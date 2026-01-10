@@ -29,9 +29,10 @@ const BASE_URL =
 // Twilio Voice Webhook
 // ========================
 app.post("/voice", async (req, res) => {
-  console.log("📞 Incoming call:", req.body);
+  try {
+    console.log("📞 Incoming call:", req.body);
 
-  const twiml = `
+    const twiml = `
 <Response>
   <Say voice="Polly.Joanna">
     Hi, this is AVA, your AI assistant for HVAC services.
@@ -48,31 +49,41 @@ app.post("/voice", async (req, res) => {
 </Response>
 `.trim();
 
-  res.type("text/xml");
-  res.send(twiml);
+    res.type("text/xml");
+    res.send(twiml);
+  } catch (err) {
+    console.error("❌ Error in /voice route:", err);
+    res.status(500).type("text/xml").send(
+      `<Response>
+        <Say voice="Polly.Joanna">Sorry, there was an error processing your call. Please try again later.</Say>
+        <Hangup/>
+      </Response>`
+    );
+  }
 });
 
 // ========================
 // Process Speech
 // ========================
 app.post("/process-speech", async (req, res) => {
-  const speech = req.body.SpeechResult || "";
-
-  console.log("🗣️ Caller said:", speech);
-
   try {
-    await axios.post(
-      "https://tamigoated.app.n8n.cloud/webhook-test/incoming-message",
-      {
-        caller_message: speech,
-        source: "twilio",
-      }
-    );
-  } catch (err) {
-    console.error("❌ n8n webhook failed:", err.message);
-  }
+    const speech = req.body.SpeechResult || "";
 
-  const twiml = `
+    console.log("🗣️ Caller said:", speech);
+
+    try {
+      await axios.post(
+        "https://tamigoated.app.n8n.cloud/webhook-test/incoming-message",
+        {
+          caller_message: speech,
+          source: "twilio",
+        }
+      );
+    } catch (err) {
+      console.error("❌ n8n webhook failed:", err.message);
+    }
+
+    const twiml = `
 <Response>
   <Say voice="Polly.Joanna">
     Thank you. A technician will contact you shortly.
@@ -81,8 +92,17 @@ app.post("/process-speech", async (req, res) => {
 </Response>
 `.trim();
 
-  res.type("text/xml");
-  res.send(twiml);
+    res.type("text/xml");
+    res.send(twiml);
+  } catch (err) {
+    console.error("❌ Error in /process-speech route:", err);
+    res.status(500).type("text/xml").send(
+      `<Response>
+        <Say voice="Polly.Joanna">Sorry, there was an error processing your message.</Say>
+        <Hangup/>
+      </Response>`
+    );
+  }
 });
 
 // ========================
