@@ -1,6 +1,19 @@
 const express = require("express");
 const axios = require("axios");
 
+console.log("📦 Starting server...");
+console.log(`Node version: ${process.version}`);
+
+// Global error handlers
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught Exception:", err);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
+});
+
 const app = express();
 
 // Twilio sends application/x-www-form-urlencoded
@@ -106,10 +119,29 @@ app.post("/process-speech", async (req, res) => {
 });
 
 // ========================
+// Error Handling Middleware
+// ========================
+app.use((err, req, res, next) => {
+  console.error("❌ Unhandled error:", err);
+  res.status(500).json({ error: "Internal server error" });
+});
+
+// 404 handler
+app.use((req, res) => {
+  console.log(`⚠️ 404: ${req.method} ${req.path}`);
+  res.status(404).json({ error: "Not found" });
+});
+
+// ========================
 // Start Server (Render-safe)
 // ========================
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📍 Health check: http://0.0.0.0:${PORT}/health`);
+  console.log(`📍 Root: http://0.0.0.0:${PORT}/`);
+}).on("error", (err) => {
+  console.error("❌ Failed to start server:", err);
+  process.exit(1);
 });
 
 
