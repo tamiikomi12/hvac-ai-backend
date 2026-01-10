@@ -25,8 +25,16 @@ app.use(express.json());
 // Config
 // ========================
 const PORT = process.env.PORT || 3000;
-const BASE_URL =
+let BASE_URL =
   process.env.BASE_URL || `http://localhost:${PORT}`;
+// Sanitize BASE_URL: remove trailing slashes and path segments
+try {
+  const url = new URL(BASE_URL);
+  BASE_URL = url.origin; // Extract just protocol + hostname + port
+} catch (err) {
+  // If URL parsing fails, remove trailing slash and any path segments
+  BASE_URL = BASE_URL.replace(/\/[^\/]*$/, "").replace(/\/+$/, "");
+}
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
