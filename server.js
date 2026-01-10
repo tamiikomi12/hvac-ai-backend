@@ -37,6 +37,9 @@ app.get("/health", (req, res) => {
 const PORT = process.env.PORT || 3000;
 const BASE_URL =
   process.env.BASE_URL || `http://localhost:${PORT}`;
+const N8N_WEBHOOK_URL =
+  process.env.N8N_WEBHOOK_URL ||
+  "https://tamigoated.app.n8n.cloud/webhook/incoming-message";
 
 // ========================
 // Twilio Voice Webhook
@@ -85,15 +88,13 @@ app.post("/process-speech", async (req, res) => {
     console.log("🗣️ Caller said:", speech);
 
     try {
-      await axios.post(
-        "https://tamigoated.app.n8n.cloud/webhook-test/incoming-message",
-        {
-          caller_message: speech,
-          source: "twilio",
-        }
-      );
+      const resp = await axios.post(N8N_WEBHOOK_URL, {
+        caller_message: speech,
+        source: "twilio",
+      });
+      console.log("✅ Sent to n8n:", resp.status);
     } catch (err) {
-      console.error("❌ n8n webhook failed:", err.message);
+      console.error("❌ n8n webhook failed:", err.response?.status, err.response?.data);
     }
 
     const twiml = `
