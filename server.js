@@ -118,17 +118,12 @@ app.post("/voice", async (req, res) => {
     action="${BASE_URL}/process-speech"
     method="POST"
     speechTimeout="auto"
-    timeout="5"
+    timeout="6"
     language="en-US"
   >
-    <Say voice="Polly.Joanna">
-      Hi, this is AVA, your AI assistant for HVAC services. How can I help you today?
-    </Say>
+    <Say voice="Polly.Joanna">Hi, this is AVA. Please tell me what's going on with your HVAC.</Say>
   </Gather>
-  <Say voice="Polly.Joanna">
-    I didn't hear anything. Please call back if you need assistance. Goodbye.
-  </Say>
-  <Hangup/>
+  <Say voice="Polly.Joanna">Sorry, I didn't catch that. Please call again.</Say>
 </Response>
 `.trim();
 
