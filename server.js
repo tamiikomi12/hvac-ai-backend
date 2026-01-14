@@ -1,6 +1,7 @@
 const express = require("express");
 const OpenAI = require("openai");
 const axios = require("axios");
+const Airtable = require("airtable");
 
 console.log("📦 Starting server...");
 console.log(`Node version: ${process.version}`);
@@ -38,6 +39,8 @@ try {
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY || "patuKEhq1qfxRU5R8";
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID || "apprVWTVIFlQYCov3";
 
 // Initialize OpenAI client
 if (!OPENAI_API_KEY) {
@@ -46,6 +49,17 @@ if (!OPENAI_API_KEY) {
 const openai = OPENAI_API_KEY
   ? new OpenAI({ apiKey: OPENAI_API_KEY })
   : null;
+
+// Initialize Airtable
+const airtableBase = AIRTABLE_API_KEY && AIRTABLE_BASE_ID
+  ? new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID)
+  : null;
+
+if (airtableBase) {
+  console.log("✅ Airtable configured");
+} else {
+  console.warn("⚠️ Airtable not configured");
+}
 
 // ========================
 // Conversation Store
