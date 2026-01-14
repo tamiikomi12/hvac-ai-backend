@@ -3,6 +3,19 @@ const OpenAI = require("openai");
 const axios = require("axios");
 const Airtable = require("airtable");
 
+// Conversation states
+const CONVERSATION_STATES = {
+  GREETING: "GREETING",
+  DETERMINE_CALL_TYPE: "DETERMINE_CALL_TYPE",
+  GET_NAME: "GET_NAME",
+  GET_PHONE: "GET_PHONE",
+  GET_ADDRESS: "GET_ADDRESS",
+  GET_ISSUE: "GET_ISSUE",
+  CONFIRM: "CONFIRM",
+  COMPLETE: "COMPLETE",
+  LEAD_INQUIRY: "LEAD_INQUIRY",
+};
+
 console.log("📦 Starting server...");
 console.log(`Node version: ${process.version}`);
 
@@ -64,7 +77,7 @@ if (airtableBase) {
 // ========================
 // Conversation Store
 // ========================
-// In-memory store: { CallSid: { history: [...], lastActive: timestamp } }
+// In-memory store: { CallSid: { history: [...], lastActive: timestamp, state: '...', collectedData: {...} } }
 const conversations = new Map();
 
 // Helper: Escape XML special characters for TwiML
@@ -99,6 +112,125 @@ function cleanupOldConversations() {
 // Run cleanup every 5 minutes
 setInterval(cleanupOldConversations, 5 * 60 * 1000);
 
+// Helper: Determine priority from issue description
+function determinePriority(issueDescription) {
+  const issue = issueDescription.toLowerCase();
+
+  // Emergency keywords
+  if (
+    issue.includes("not working") ||
+    issue.includes("no heat") ||
+    issue.includes("no ac") ||
+    issue.includes("no air") ||
+    issue.includes("freezing") ||
+    issue.includes("too hot") ||
+    issue.includes("emergency")
+  ) {
+    return "Emergency";
+  }
+
+  // Urgent keywords
+  if (
+    issue.includes("strange noise") ||
+    issue.includes("smell") ||
+    issue.includes("leaking") ||
+    issue.includes("leak") ||
+    issue.includes("loud")
+  ) {
+    return "Urgent";
+  }
+
+  // Default to standard
+  return "Standard";
+}
+
+// Helper: Determine system type from issue description
+function determineSystemType(issueDescription) {
+  const issue = issueDescription.toLowerCase();
+
+  if (
+    issue.includes("heat") ||
+    issue.includes("furnace") ||
+    issue.includes("warm")
+  ) {
+    return "Heating";
+  }
+
+  if (
+    issue.includes("ac") ||
+    issue.includes("air conditioning") ||
+    issue.includes("cooling") ||
+    issue.includes("cold")
+  ) {
+    return "Cooling";
+  }
+
+  return "Unknown";
+}
+
+// Helper: Extract data from user responses using OpenAI
+async function extractDataFromResponse(userMessage, fieldToExtract) {
+  if (!openai) return null;
+
+  const prompts = {
+    name: "Extract just the person's name from this message. Return only the name, nothing else: ",
+    phone: "Extract the phone number from this message. Return only the phone number in format XXX-XXX-XXXX if possible, otherwise as given: ",
+    address:
+      "Extract the full service address from this message. Return only the address: ",
+    callType:
+      'Is this person calling to schedule HVAC service (return "work_order") or just asking for information/pricing (return "lead")? Return only work_order or lead: ',
+  };
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_MODEL,
+      messages: [
+        {
+          role: "user",
+          content: prompts[fieldToExtract] + userMessage,
+        },
+      ],
+      temperature: 0.3,
+      max_tokens: 50,
+    });
+
+    const extracted = completion.choices[0]?.message?.content?.trim();
+    return extracted || null;
+  } catch (err) {
+    console.error("Error extracting data:", err);
+    return null;
+  }
+}
+
+// Helper: Get prompt for current state
+function getPromptForState(state, collectedData) {
+  switch (state) {
+    case CONVERSATION_STATES.GREETING:
+      return "You are AVA, an AI assistant for an HVAC company. Greet the caller warmly and ask if they are calling to schedule HVAC service or if they have questions about pricing and services. Keep it brief and friendly.";
+
+    case CONVERSATION_STATES.GET_NAME:
+      return "You are AVA. The caller wants to schedule service. Ask for their name in a friendly way. Keep it brief.";
+
+    case CONVERSATION_STATES.GET_PHONE:
+      return `You are AVA. You're speaking with ${collectedData.name || "the caller"}. Ask for their phone number in a friendly way. Keep it brief.`;
+
+    case CONVERSATION_STATES.GET_ADDRESS:
+      return `You are AVA. You're speaking with ${collectedData.name || "the caller"}. Ask for the address where they need HVAC service. Keep it brief.`;
+
+    case CONVERSATION_STATES.GET_ISSUE:
+      return `You are AVA. You're speaking with ${collectedData.name || "the caller"}. Ask them to describe what's happening with their HVAC system. Keep it brief.`;
+
+    case CONVERSATION_STATES.CONFIRM:
+      return `You are AVA. Confirm the service request with these details: Name: ${collectedData.name}, Phone: ${collectedData.phone}, Address: ${collectedData.address}, Issue: ${collectedData.issue}. Tell them a technician will contact them within 2 hours. Ask if there's anything else to note. Keep it brief and reassuring.`;
+
+    case CONVERSATION_STATES.LEAD_INQUIRY:
+      return "You are AVA. The caller is asking for information about HVAC services. Answer their questions helpfully and ask if you can take their contact information for follow-up. Keep responses brief.";
+
+    default:
+      return "You are AVA, a helpful AI assistant for HVAC services. Be concise and friendly.";
+  }
+}
+
 // ========================
 // Health & Root
 // ========================
@@ -121,14 +253,18 @@ app.post("/voice", async (req, res) => {
     // Initialize conversation for this call
     if (callSid) {
       conversations.set(callSid, {
-        history: [
-          {
-            role: "system",
-            content:
-              "You are AVA, a helpful AI assistant for HVAC services. Be concise and friendly in your responses, suitable for voice conversation. Keep responses under 3 sentences when possible.",
-          },
-        ],
+        history: [],
         lastActive: Date.now(),
+        state: CONVERSATION_STATES.GREETING,
+        collectedData: {
+          callType: null,
+          name: null,
+          phone: null,
+          address: null,
+          issue: null,
+          systemType: null,
+          priority: null,
+        },
       });
     }
 
