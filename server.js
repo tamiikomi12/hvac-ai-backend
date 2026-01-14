@@ -342,7 +342,7 @@ app.post("/voice", async (req, res) => {
         collectedData: {
           callType: null,
           name: null,
-          phone: null,
+          phone: req.body.From || null, // Auto-capture from Twilio
           address: null,
           issue: null,
           systemType: null,
@@ -424,7 +424,7 @@ app.post("/process-speech", async (req, res) => {
         collectedData: {
           callType: null,
           name: null,
-          phone: null,
+          phone: req.body.From || null, // Auto-capture from Twilio
           address: null,
           issue: null,
           systemType: null,
@@ -477,26 +477,16 @@ app.post("/process-speech", async (req, res) => {
 
         if (name && name.length > 1) {
           collectedData.name = name;
-          nextState = CONVERSATION_STATES.GET_PHONE;
+          nextState = CONVERSATION_STATES.GET_ADDRESS; // Skip phone, go straight to address
         } else {
           // Didn't get valid name, ask again
           nextState = CONVERSATION_STATES.GET_NAME;
         }
         break;
 
-      case CONVERSATION_STATES.GET_PHONE:
-        // Extract phone
-        const phone = await extractDataFromResponse(speech, "phone");
-        console.log(`🎯 Extracted phone: ${phone}`);
-
-        if (phone && phone.length >= 10) {
-          collectedData.phone = phone;
-          nextState = CONVERSATION_STATES.GET_ADDRESS;
-        } else {
-          // Didn't get valid phone, ask again
-          nextState = CONVERSATION_STATES.GET_PHONE;
-        }
-        break;
+      // case CONVERSATION_STATES.GET_PHONE:
+      //   // No longer needed - phone is auto-captured from Twilio
+      //   break;
 
       case CONVERSATION_STATES.GET_ADDRESS:
         // Extract address
