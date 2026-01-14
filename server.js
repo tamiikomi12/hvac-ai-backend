@@ -359,7 +359,7 @@ app.post("/voice", async (req, res) => {
     timeout="6"
     language="en-US"
   >
-    <Say voice="Polly.Joanna" rate="110%">Hi, this is AVA. Please tell me what's going on with your HVAC.</Say>
+    <Say voice="Polly.Joanna" rate="110%">Hi, this is AVA. Are you calling to schedule HVAC service, or do you have questions about our services?</Say>
   </Gather>
   <Say voice="Polly.Joanna" rate="110%">Sorry, I didn't catch that. Please call again.</Say>
 </Response>
@@ -533,35 +533,63 @@ app.post("/process-speech", async (req, res) => {
     conversation.state = nextState;
     console.log(`➡️  Next state: ${nextState}`);
 
-    // Generate response using OpenAI based on new state
-    if (!openai) {
-      assistantReply =
-        "I'm sorry, but I'm not properly configured right now. Please contact support directly.";
+    // Generate response based on new state
+    if (
+      nextState === CONVERSATION_STATES.DETERMINE_CALL_TYPE ||
+      nextState === CONVERSATION_STATES.GET_NAME ||
+      nextState === CONVERSATION_STATES.GET_ADDRESS ||
+      nextState === CONVERSATION_STATES.GET_ISSUE ||
+      nextState === CONVERSATION_STATES.CONFIRM
+    ) {
+      // Use hardcoded responses for speed and consistency
+      switch (nextState) {
+        case CONVERSATION_STATES.DETERMINE_CALL_TYPE:
+          assistantReply =
+            "Are you calling to schedule HVAC service, or do you have questions about our services?";
+          break;
+        case CONVERSATION_STATES.GET_NAME:
+          assistantReply = "Great! Can I get your name please?";
+          break;
+        case CONVERSATION_STATES.GET_ADDRESS:
+          assistantReply = `Thanks ${collectedData.name}. What's the address where you need service?`;
+          break;
+        case CONVERSATION_STATES.GET_ISSUE:
+          assistantReply =
+            "Got it. Can you briefly describe what's happening with your HVAC system?";
+          break;
+        case CONVERSATION_STATES.CONFIRM:
+          assistantReply = `I've created a service request for your issue at ${collectedData.address}. A technician will call you back within 2 hours at ${collectedData.phone}. Is there anything else I should note?`;
+          break;
+      }
     } else {
-      try {
-        const systemPrompt = getPromptForState(nextState, collectedData);
+      // Only use OpenAI for LEAD_INQUIRY or other dynamic states
+      if (!openai) {
+        assistantReply = "I'm sorry, but I'm not properly configured right now.";
+      } else {
+        try {
+          const systemPrompt = getPromptForState(nextState, collectedData);
+          const messages = [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: speech },
+          ];
 
-        const messages = [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: speech },
-        ];
+          const completion = await openai.chat.completions.create({
+            model: OPENAI_MODEL,
+            messages: messages,
+            temperature: 0.1,
+            max_tokens: 80,
+          });
 
-        const completion = await openai.chat.completions.create({
-          model: OPENAI_MODEL,
-          messages: messages,
-          temperature: 0.7,
-          max_tokens: 150,
-        });
+          assistantReply = completion.choices[0]?.message?.content || "";
 
-        assistantReply = completion.choices[0]?.message?.content || "";
-
-        if (!assistantReply) {
-          throw new Error("Empty response from OpenAI");
+          if (!assistantReply) {
+            throw new Error("Empty response from OpenAI");
+          }
+        } catch (err) {
+          console.error("❌ OpenAI error:", err.message);
+          assistantReply =
+            "I'm sorry, I'm having trouble processing that right now.";
         }
-      } catch (err) {
-        console.error("❌ OpenAI error:", err.message);
-        assistantReply =
-          "I'm sorry, I'm having trouble processing that right now. Could you try again?";
       }
     }
 
