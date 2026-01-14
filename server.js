@@ -362,9 +362,9 @@ app.post("/voice", async (req, res) => {
     timeout="6"
     language="en-US"
   >
-    <Say voice="Polly.Joanna">Hi, this is AVA. Please tell me what's going on with your HVAC.</Say>
+    <Say voice="Polly.Joanna" rate="110%">Hi, this is AVA. Please tell me what's going on with your HVAC.</Say>
   </Gather>
-  <Say voice="Polly.Joanna">Sorry, I didn't catch that. Please call again.</Say>
+  <Say voice="Polly.Joanna" rate="110%">Sorry, I didn't catch that. Please call again.</Say>
 </Response>
 `.trim();
 
@@ -374,7 +374,7 @@ app.post("/voice", async (req, res) => {
     console.error("❌ Error in /voice route:", err);
     res.status(500).type("text/xml").send(
       `<Response>
-        <Say voice="Polly.Joanna">Sorry, there was an error processing your call. Please try again later.</Say>
+        <Say voice="Polly.Joanna" rate="110%">Sorry, there was an error processing your call. Please try again later.</Say>
         <Hangup/>
       </Response>`
     );
@@ -396,7 +396,7 @@ app.post("/process-speech", async (req, res) => {
       console.error("❌ No CallSid provided");
       return res.status(400).type("text/xml").send(
         `<Response>
-          <Say voice="Polly.Joanna">Sorry, there was an error. Please call again.</Say>
+          <Say voice="Polly.Joanna" rate="110%">Sorry, there was an error. Please call again.</Say>
           <Hangup/>
         </Response>`
       );
@@ -408,7 +408,7 @@ app.post("/process-speech", async (req, res) => {
       conversations.delete(callSid);
       return res.type("text/xml").send(
         `<Response>
-          <Say voice="Polly.Joanna">Goodbye! Have a great day.</Say>
+          <Say voice="Polly.Joanna" rate="110%">Goodbye! Have a great day.</Say>
           <Hangup/>
         </Response>`
       );
@@ -541,7 +541,7 @@ app.post("/process-speech", async (req, res) => {
         conversations.delete(callSid);
         return res.type("text/xml").send(
           `<Response>
-            <Say voice="Polly.Joanna">Thank you for calling. Have a great day!</Say>
+            <Say voice="Polly.Joanna" rate="110%">Thank you for calling. Have a great day!</Say>
             <Hangup/>
           </Response>`
         );
@@ -607,7 +607,7 @@ app.post("/process-speech", async (req, res) => {
     // Return TwiML
     const twiml = `
 <Response>
-  <Say voice="Polly.Joanna">${escapedReply}</Say>
+  <Say voice="Polly.Joanna" rate="110%">${escapedReply}</Say>
   <Gather 
     input="speech"
     action="${BASE_URL}/process-speech"
@@ -616,7 +616,7 @@ app.post("/process-speech", async (req, res) => {
     timeout="5"
     language="en-US"
   />
-  <Say voice="Polly.Joanna">I didn't hear anything. If you're done, just say goodbye.</Say>
+  <Say voice="Polly.Joanna" rate="110%">I didn't hear anything. If you're done, just say goodbye.</Say>
   <Gather 
     input="speech"
     action="${BASE_URL}/process-speech"
@@ -625,7 +625,7 @@ app.post("/process-speech", async (req, res) => {
     timeout="5"
     language="en-US"
   />
-  <Say voice="Polly.Joanna">Goodbye.</Say>
+  <Say voice="Polly.Joanna" rate="110%">Goodbye.</Say>
   <Hangup/>
 </Response>
 `.trim();
@@ -636,7 +636,7 @@ app.post("/process-speech", async (req, res) => {
     console.error("❌ Error in /process-speech route:", err);
     res.status(500).type("text/xml").send(
       `<Response>
-        <Say voice="Polly.Joanna">Sorry, there was an error. Please try again.</Say>
+        <Say voice="Polly.Joanna" rate="110%">Sorry, there was an error. Please try again.</Say>
         <Hangup/>
       </Response>`
     );
