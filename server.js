@@ -206,28 +206,25 @@ async function extractDataFromResponse(userMessage, fieldToExtract) {
 function getPromptForState(state, collectedData) {
   switch (state) {
     case CONVERSATION_STATES.GREETING:
-      return "You are AVA, an AI assistant for an HVAC company. Greet the caller warmly and ask if they are calling to schedule HVAC service or if they have questions about pricing and services. Keep it brief and friendly.";
+      return 'You are AVA, a receptionist for an HVAC company. Say: "Hi, this is AVA. Are you calling to schedule HVAC service, or do you have questions about our services?" Say ONLY this. Do not add anything else.';
 
     case CONVERSATION_STATES.GET_NAME:
-      return "You are AVA. The caller wants to schedule service. Ask for their name in a friendly way. Keep it brief.";
-
-    case CONVERSATION_STATES.GET_PHONE:
-      return `You are AVA. You're speaking with ${collectedData.name || "the caller"}. Ask for their phone number in a friendly way. Keep it brief.`;
+      return 'You are AVA, a receptionist. Say: "Great! Can I get your name please?" Say ONLY this. Do not add anything else.';
 
     case CONVERSATION_STATES.GET_ADDRESS:
-      return `You are AVA. You're speaking with ${collectedData.name || "the caller"}. Ask for the address where they need HVAC service. Keep it brief.`;
+      return `You are AVA, a receptionist. Say: "Thanks ${collectedData.name}. What's the address where you need service?" Say ONLY this. Do not add anything else.`;
 
     case CONVERSATION_STATES.GET_ISSUE:
-      return `You are AVA, a receptionist for an HVAC company. You're speaking with ${collectedData.name || "the caller"}. Ask them to briefly describe what's happening with their HVAC system. DO NOT provide troubleshooting advice or solutions. DO NOT list steps they can try. Just acknowledge their issue and move on. Keep it very brief - one sentence to ask, then listen.`;
+      return `You are AVA, a receptionist. Say: "Got it. Can you briefly describe what's happening with your HVAC system?" Say ONLY this. Do not provide ANY troubleshooting advice. Do not list steps. Just ask the question.`;
 
     case CONVERSATION_STATES.CONFIRM:
-      return `You are AVA, a receptionist. Briefly confirm you've noted their issue: ${collectedData.issue}. Tell them a technician will call them back within 2 hours at ${collectedData.phone} to schedule service at ${collectedData.address}. Ask if there's anything else to note for the technician. DO NOT provide troubleshooting advice. Keep it brief and professional - 2-3 sentences max.`;
+      return `You are AVA, a receptionist. Say EXACTLY: "I've created a service request for ${collectedData.issue} at ${collectedData.address}. A technician will call you back within 2 hours. Is there anything else I should note?" Do NOT provide troubleshooting steps. Do NOT give advice. ONLY say this confirmation.`;
 
     case CONVERSATION_STATES.LEAD_INQUIRY:
-      return "You are AVA. The caller is asking for information about HVAC services. Answer their questions helpfully and ask if you can take their contact information for follow-up. Keep responses brief.";
+      return 'You are AVA, a receptionist. Answer their question briefly in 1-2 sentences, then ask: "Can I get your name and number for follow-up?" Keep it very brief.';
 
     default:
-      return "You are AVA, a helpful AI assistant for HVAC services. Be concise and friendly.";
+      return "You are AVA, a receptionist for HVAC services. Be brief and professional. Do not provide troubleshooting advice.";
   }
 }
 
@@ -454,32 +451,36 @@ app.post("/process-speech", async (req, res) => {
         break;
 
       case CONVERSATION_STATES.DETERMINE_CALL_TYPE:
-        // Extract whether this is a work order or lead
-        const callType = await extractDataFromResponse(speech, "callType");
-        console.log(`🎯 Extracted call type: ${callType}`);
-
-        if (callType && callType.toLowerCase().includes("work")) {
+        // Simple keyword matching instead of OpenAI call
+        if (
+          speechLower.includes("schedule") ||
+          speechLower.includes("service") ||
+          speechLower.includes("repair") ||
+          speechLower.includes("fix") ||
+          speechLower.includes("broken") ||
+          speechLower.includes("not working")
+        ) {
           collectedData.callType = "work_order";
           nextState = CONVERSATION_STATES.GET_NAME;
-        } else if (callType && callType.toLowerCase().includes("lead")) {
+        } else if (
+          speechLower.includes("question") ||
+          speechLower.includes("price") ||
+          speechLower.includes("cost") ||
+          speechLower.includes("info")
+        ) {
           collectedData.callType = "lead";
           nextState = CONVERSATION_STATES.LEAD_INQUIRY;
         } else {
-          // Couldn't determine, ask again
           nextState = CONVERSATION_STATES.DETERMINE_CALL_TYPE;
         }
         break;
 
       case CONVERSATION_STATES.GET_NAME:
-        // Extract name
-        const name = await extractDataFromResponse(speech, "name");
-        console.log(`🎯 Extracted name: ${name}`);
-
-        if (name && name.length > 1) {
-          collectedData.name = name;
-          nextState = CONVERSATION_STATES.GET_ADDRESS; // Skip phone, go straight to address
+        // Just save whatever they said as the name
+        if (speech && speech.length > 1) {
+          collectedData.name = speech.trim();
+          nextState = CONVERSATION_STATES.GET_ADDRESS;
         } else {
-          // Didn't get valid name, ask again
           nextState = CONVERSATION_STATES.GET_NAME;
         }
         break;
@@ -489,29 +490,20 @@ app.post("/process-speech", async (req, res) => {
       //   break;
 
       case CONVERSATION_STATES.GET_ADDRESS:
-        // Extract address
-        const address = await extractDataFromResponse(speech, "address");
-        console.log(`🎯 Extracted address: ${address}`);
-
-        if (address && address.length > 5) {
-          collectedData.address = address;
+        // Just save whatever they said as address
+        if (speech && speech.length > 5) {
+          collectedData.address = speech.trim();
           nextState = CONVERSATION_STATES.GET_ISSUE;
         } else {
-          // Didn't get valid address, ask again
           nextState = CONVERSATION_STATES.GET_ADDRESS;
         }
         break;
 
       case CONVERSATION_STATES.GET_ISSUE:
-        // Save the issue description as-is
-        collectedData.issue = speech;
+        // Save issue and auto-detect type/priority
+        collectedData.issue = speech.trim();
         collectedData.systemType = determineSystemType(speech);
         collectedData.priority = determinePriority(speech);
-
-        console.log(`🎯 Issue: ${speech}`);
-        console.log(`🎯 System Type: ${collectedData.systemType}`);
-        console.log(`🎯 Priority: ${collectedData.priority}`);
-
         nextState = CONVERSATION_STATES.CONFIRM;
         break;
 
