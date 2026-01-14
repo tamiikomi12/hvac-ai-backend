@@ -218,10 +218,10 @@ function getPromptForState(state, collectedData) {
       return `You are AVA. You're speaking with ${collectedData.name || "the caller"}. Ask for the address where they need HVAC service. Keep it brief.`;
 
     case CONVERSATION_STATES.GET_ISSUE:
-      return `You are AVA. You're speaking with ${collectedData.name || "the caller"}. Ask them to describe what's happening with their HVAC system. Keep it brief.`;
+      return `You are AVA, a receptionist for an HVAC company. You're speaking with ${collectedData.name || "the caller"}. Ask them to briefly describe what's happening with their HVAC system. DO NOT provide troubleshooting advice or solutions. DO NOT list steps they can try. Just acknowledge their issue and move on. Keep it very brief - one sentence to ask, then listen.`;
 
     case CONVERSATION_STATES.CONFIRM:
-      return `You are AVA. Confirm the service request with these details: Name: ${collectedData.name}, Phone: ${collectedData.phone}, Address: ${collectedData.address}, Issue: ${collectedData.issue}. Tell them a technician will contact them within 2 hours. Ask if there's anything else to note. Keep it brief and reassuring.`;
+      return `You are AVA, a receptionist. Briefly confirm you've noted their issue: ${collectedData.issue}. Tell them a technician will call them back within 2 hours at ${collectedData.phone} to schedule service at ${collectedData.address}. Ask if there's anything else to note for the technician. DO NOT provide troubleshooting advice. Keep it brief and professional - 2-3 sentences max.`;
 
     case CONVERSATION_STATES.LEAD_INQUIRY:
       return "You are AVA. The caller is asking for information about HVAC services. Answer their questions helpfully and ask if you can take their contact information for follow-up. Keep responses brief.";
