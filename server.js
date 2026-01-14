@@ -231,6 +231,89 @@ function getPromptForState(state, collectedData) {
   }
 }
 
+// Helper: Save collected data to Airtable
+async function saveToAirtable(collectedData, callerPhoneNumber) {
+  if (!airtableBase) {
+    console.error("❌ Airtable not configured");
+    return;
+  }
+
+  try {
+    console.log("💾 Saving to Airtable:", collectedData);
+
+    if (collectedData.callType === "work_order") {
+      // First, check if customer exists by phone number
+      let customerId = null;
+
+      try {
+        const existingCustomers = await airtableBase("Customers")
+          .select({
+            filterByFormula: `{Phone Number} = "${collectedData.phone}"`,
+            maxRecords: 1,
+          })
+          .firstPage();
+
+        if (existingCustomers && existingCustomers.length > 0) {
+          customerId = existingCustomers[0].id;
+          console.log("✅ Found existing customer:", customerId);
+        }
+      } catch (err) {
+        console.log("ℹ️ No existing customer found, will create new");
+      }
+
+      // If customer doesn't exist, create new customer
+      if (!customerId) {
+        const newCustomer = await airtableBase("Customers").create([
+          {
+            fields: {
+              "Customer Name": collectedData.name,
+              "Phone Number": collectedData.phone,
+              "Primary Address": collectedData.address,
+              "Customer Type": "Residential",
+              "Source": "Direct Work Order",
+            },
+          },
+        ]);
+        customerId = newCustomer[0].id;
+        console.log("✅ Created new customer:", customerId);
+      }
+
+      // Create work order
+      const workOrder = await airtableBase("Work Orders").create([
+        {
+          fields: {
+            Customer: [customerId],
+            "Service Address": collectedData.address,
+            "Issue Description": collectedData.issue,
+            "System Type": collectedData.systemType,
+            Priority: collectedData.priority,
+            Status: "New",
+          },
+        },
+      ]);
+
+      console.log("✅ Created work order:", workOrder[0].id);
+    } else if (collectedData.callType === "lead") {
+      // Save as lead
+      const lead = await airtableBase("Leads").create([
+        {
+          fields: {
+            "Lead Name": collectedData.name || "Unknown",
+            "Phone Number": collectedData.phone || callerPhoneNumber,
+            Notes: collectedData.issue || "General inquiry",
+            Status: "New",
+            "Inquiry Type": "General Question",
+          },
+        },
+      ]);
+
+      console.log("✅ Created lead:", lead[0].id);
+    }
+  } catch (err) {
+    console.error("❌ Error saving to Airtable:", err);
+  }
+}
+
 // ========================
 // Health & Root
 // ========================
@@ -335,14 +418,18 @@ app.post("/process-speech", async (req, res) => {
     let conversation = conversations.get(callSid);
     if (!conversation) {
       conversation = {
-        history: [
-          {
-            role: "system",
-            content:
-              "You are AVA, a helpful AI assistant for HVAC services. Be concise and friendly in your responses, suitable for voice conversation. Keep responses under 3 sentences when possible.",
-          },
-        ],
+        history: [],
         lastActive: Date.now(),
+        state: CONVERSATION_STATES.GREETING,
+        collectedData: {
+          callType: null,
+          name: null,
+          phone: null,
+          address: null,
+          issue: null,
+          systemType: null,
+          priority: null,
+        },
       };
       conversations.set(callSid, conversation);
     }
@@ -350,50 +437,152 @@ app.post("/process-speech", async (req, res) => {
     // Update last active time
     conversation.lastActive = Date.now();
 
-    // Append user message to history
-    conversation.history.push({
-      role: "user",
-      content: speech,
-    });
+    const currentState = conversation.state;
+    const collectedData = conversation.collectedData;
 
-    // Call OpenAI
+    console.log(`📍 Current state: ${currentState}`);
+
+    // STATE MACHINE LOGIC
+    let nextState = currentState;
     let assistantReply = "";
+
+    // Process based on current state
+    switch (currentState) {
+      case CONVERSATION_STATES.GREETING:
+        // Initial greeting - move to determine call type
+        nextState = CONVERSATION_STATES.DETERMINE_CALL_TYPE;
+        break;
+
+      case CONVERSATION_STATES.DETERMINE_CALL_TYPE:
+        // Extract whether this is a work order or lead
+        const callType = await extractDataFromResponse(speech, "callType");
+        console.log(`🎯 Extracted call type: ${callType}`);
+
+        if (callType && callType.toLowerCase().includes("work")) {
+          collectedData.callType = "work_order";
+          nextState = CONVERSATION_STATES.GET_NAME;
+        } else if (callType && callType.toLowerCase().includes("lead")) {
+          collectedData.callType = "lead";
+          nextState = CONVERSATION_STATES.LEAD_INQUIRY;
+        } else {
+          // Couldn't determine, ask again
+          nextState = CONVERSATION_STATES.DETERMINE_CALL_TYPE;
+        }
+        break;
+
+      case CONVERSATION_STATES.GET_NAME:
+        // Extract name
+        const name = await extractDataFromResponse(speech, "name");
+        console.log(`🎯 Extracted name: ${name}`);
+
+        if (name && name.length > 1) {
+          collectedData.name = name;
+          nextState = CONVERSATION_STATES.GET_PHONE;
+        } else {
+          // Didn't get valid name, ask again
+          nextState = CONVERSATION_STATES.GET_NAME;
+        }
+        break;
+
+      case CONVERSATION_STATES.GET_PHONE:
+        // Extract phone
+        const phone = await extractDataFromResponse(speech, "phone");
+        console.log(`🎯 Extracted phone: ${phone}`);
+
+        if (phone && phone.length >= 10) {
+          collectedData.phone = phone;
+          nextState = CONVERSATION_STATES.GET_ADDRESS;
+        } else {
+          // Didn't get valid phone, ask again
+          nextState = CONVERSATION_STATES.GET_PHONE;
+        }
+        break;
+
+      case CONVERSATION_STATES.GET_ADDRESS:
+        // Extract address
+        const address = await extractDataFromResponse(speech, "address");
+        console.log(`🎯 Extracted address: ${address}`);
+
+        if (address && address.length > 5) {
+          collectedData.address = address;
+          nextState = CONVERSATION_STATES.GET_ISSUE;
+        } else {
+          // Didn't get valid address, ask again
+          nextState = CONVERSATION_STATES.GET_ADDRESS;
+        }
+        break;
+
+      case CONVERSATION_STATES.GET_ISSUE:
+        // Save the issue description as-is
+        collectedData.issue = speech;
+        collectedData.systemType = determineSystemType(speech);
+        collectedData.priority = determinePriority(speech);
+
+        console.log(`🎯 Issue: ${speech}`);
+        console.log(`🎯 System Type: ${collectedData.systemType}`);
+        console.log(`🎯 Priority: ${collectedData.priority}`);
+
+        nextState = CONVERSATION_STATES.CONFIRM;
+        break;
+
+      case CONVERSATION_STATES.CONFIRM:
+        // Save to Airtable and complete
+        await saveToAirtable(collectedData, req.body.From);
+        nextState = CONVERSATION_STATES.COMPLETE;
+        break;
+
+      case CONVERSATION_STATES.LEAD_INQUIRY:
+        // Handle lead conversation - for now just have a conversation
+        // We'll enhance this later
+        break;
+
+      case CONVERSATION_STATES.COMPLETE:
+        // Done - thank them and hang up
+        conversations.delete(callSid);
+        return res.type("text/xml").send(
+          `<Response>
+            <Say voice="Polly.Joanna">Thank you for calling. Have a great day!</Say>
+            <Hangup/>
+          </Response>`
+        );
+    }
+
+    // Update state
+    conversation.state = nextState;
+    console.log(`➡️  Next state: ${nextState}`);
+
+    // Generate response using OpenAI based on new state
     if (!openai) {
       assistantReply =
         "I'm sorry, but I'm not properly configured right now. Please contact support directly.";
-      console.error("❌ OpenAI client not initialized");
     } else {
       try {
-        console.log("🤖 Calling OpenAI with history length:", conversation.history.length);
+        const systemPrompt = getPromptForState(nextState, collectedData);
+
+        const messages = [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: speech },
+        ];
 
         const completion = await openai.chat.completions.create({
           model: OPENAI_MODEL,
-          messages: conversation.history,
+          messages: messages,
           temperature: 0.7,
-          max_tokens: 200, // Keep responses short for voice
+          max_tokens: 150,
         });
 
         assistantReply = completion.choices[0]?.message?.content || "";
-        console.log("✅ OpenAI response:", assistantReply.substring(0, 100) + "...");
 
         if (!assistantReply) {
           throw new Error("Empty response from OpenAI");
         }
-
-        // Append assistant reply to history
-        conversation.history.push({
-          role: "assistant",
-          content: assistantReply,
-        });
       } catch (err) {
         console.error("❌ OpenAI error:", err.message);
         assistantReply =
           "I'm sorry, I'm having trouble processing that right now. Could you try again?";
-        // Don't append error to history, just use fallback message
       }
     }
 
-    // Escape XML in the reply
     const escapedReply = escapeXml(assistantReply);
 
     // Log to n8n (non-blocking)
@@ -415,7 +604,7 @@ app.post("/process-speech", async (req, res) => {
       }
     }
 
-    // Return TwiML with Say and Gather (loop)
+    // Return TwiML
     const twiml = `
 <Response>
   <Say voice="Polly.Joanna">${escapedReply}</Say>
@@ -447,16 +636,7 @@ app.post("/process-speech", async (req, res) => {
     console.error("❌ Error in /process-speech route:", err);
     res.status(500).type("text/xml").send(
       `<Response>
-        <Say voice="Polly.Joanna">Sorry, there was an error processing your message. Please try again.</Say>
-        <Gather 
-          input="speech"
-          action="${BASE_URL}/process-speech"
-          method="POST"
-          speechTimeout="auto"
-          timeout="5"
-          language="en-US"
-        />
-        <Say voice="Polly.Joanna">Goodbye.</Say>
+        <Say voice="Polly.Joanna">Sorry, there was an error. Please try again.</Say>
         <Hangup/>
       </Response>`
     );
