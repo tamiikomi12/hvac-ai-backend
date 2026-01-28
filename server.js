@@ -1,7 +1,7 @@
 const express = require("express");
 const OpenAI = require("openai");
 const axios = require("axios");
-const Airtable = require("airtable");
+const { createClient } = require("@supabase/supabase-js");
 
 // Conversation states
 const CONVERSATION_STATES = {
@@ -52,8 +52,12 @@ try {
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
-const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY || "patuKEhq1qfxRU5R8";
-const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID || "apprVWTVIFlQYCov3";
+const SUPABASE_URL =
+  process.env.SUPABASE_URL ||
+  "https://okgbvaeaqrcuxlzgwgjc.supabase.co";
+const SUPABASE_ANON_KEY =
+  process.env.SUPABASE_ANON_KEY ||
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9rZ2J2YWVhcXJjdXhsemd3Z2pjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk1NjMwMTMsImV4cCI6MjA4NTEzOTAxM30.BPsHornv7HW_RX7Ys7FBaeCygnN9BV7FwLWmMjaUQLU";
 
 // Initialize OpenAI client
 if (!OPENAI_API_KEY) {
@@ -63,15 +67,16 @@ const openai = OPENAI_API_KEY
   ? new OpenAI({ apiKey: OPENAI_API_KEY })
   : null;
 
-// Initialize Airtable
-const airtableBase = AIRTABLE_API_KEY && AIRTABLE_BASE_ID
-  ? new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID)
-  : null;
+// Initialize Supabase
+const supabase =
+  SUPABASE_URL && SUPABASE_ANON_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+    : null;
 
-if (airtableBase) {
-  console.log("✅ Airtable configured");
+if (supabase) {
+  console.log("✅ Supabase configured");
 } else {
-  console.warn("⚠️ Airtable not configured");
+  console.warn("⚠️ Supabase not configured");
 }
 
 // ========================
@@ -228,86 +233,102 @@ function getPromptForState(state, collectedData) {
   }
 }
 
-// Helper: Save collected data to Airtable
-async function saveToAirtable(collectedData, callerPhoneNumber) {
-  if (!airtableBase) {
-    console.error("❌ Airtable not configured");
+// Helper: Save collected data to Supabase
+async function saveToSupabase(collectedData, callerPhoneNumber) {
+  if (!supabase) {
+    console.error("❌ Supabase not configured");
     return;
   }
 
   try {
-    console.log("💾 Saving to Airtable:", collectedData);
+    console.log("💾 Saving to Supabase:", collectedData);
 
     if (collectedData.callType === "work_order") {
-      // First, check if customer exists by phone number
-      let customerId = null;
+      // Check if customer exists by phone number
+      const { data: existingCustomers, error: searchError } = await supabase
+        .from("customers")
+        .select("id")
+        .eq("phone_number", collectedData.phone)
+        .limit(1);
 
-      try {
-        const existingCustomers = await airtableBase("Customers")
-          .select({
-            filterByFormula: `{Phone Number} = "${collectedData.phone}"`,
-            maxRecords: 1,
-          })
-          .firstPage();
-
-        if (existingCustomers && existingCustomers.length > 0) {
-          customerId = existingCustomers[0].id;
-          console.log("✅ Found existing customer:", customerId);
-        }
-      } catch (err) {
-        console.log("ℹ️ No existing customer found, will create new");
+      if (searchError) {
+        console.error("Error searching for customer:", searchError);
       }
 
-      // If customer doesn't exist, create new customer
-      if (!customerId) {
-        const newCustomer = await airtableBase("Customers").create([
-          {
-            fields: {
-              "Customer Name": collectedData.name,
-              "Phone Number": collectedData.phone,
-              "Primary Address": collectedData.address,
-              "Customer Type": "Residential",
-              "Source": "Direct Work Order",
+      let customerId = null;
+
+      if (existingCustomers && existingCustomers.length > 0) {
+        customerId = existingCustomers[0].id;
+        console.log("✅ Found existing customer:", customerId);
+      } else {
+        // Create new customer
+        const { data: newCustomer, error: customerError } = await supabase
+          .from("customers")
+          .insert([
+            {
+              customer_name: collectedData.name,
+              phone_number: collectedData.phone,
+              primary_address: collectedData.address,
+              customer_type: "Residential",
+              source: "Direct Work Order",
             },
-          },
-        ]);
+          ])
+          .select();
+
+        if (customerError) {
+          console.error("❌ Error creating customer:", customerError);
+          return;
+        }
+
         customerId = newCustomer[0].id;
         console.log("✅ Created new customer:", customerId);
       }
 
       // Create work order
-      const workOrder = await airtableBase("Work Orders").create([
-        {
-          fields: {
-            Customer: [customerId],
-            "Service Address": collectedData.address,
-            "Issue Description": collectedData.issue,
-            "System Type": collectedData.systemType,
-            Priority: collectedData.priority,
-            Status: "New",
+      const { data: workOrder, error: workOrderError } = await supabase
+        .from("work_orders")
+        .insert([
+          {
+            customer_id: customerId,
+            service_address: collectedData.address,
+            issue_description: collectedData.issue,
+            system_type: collectedData.systemType,
+            priority: collectedData.priority,
+            status: "New",
           },
-        },
-      ]);
+        ])
+        .select();
+
+      if (workOrderError) {
+        console.error("❌ Error creating work order:", workOrderError);
+        return;
+      }
 
       console.log("✅ Created work order:", workOrder[0].id);
     } else if (collectedData.callType === "lead") {
       // Save as lead
-      const lead = await airtableBase("Leads").create([
-        {
-          fields: {
-            "Lead Name": collectedData.name || "Unknown",
-            "Phone Number": collectedData.phone || callerPhoneNumber,
-            Notes: collectedData.issue || "General inquiry",
-            Status: "New",
-            "Inquiry Type": "General Question",
+      const { data: lead, error: leadError } = await supabase
+        .from("leads")
+        .insert([
+          {
+            lead_name: collectedData.name || "Unknown",
+            phone_number: collectedData.phone || callerPhoneNumber,
+            notes: collectedData.issue || "General inquiry",
+            status: "New",
+            inquiry_type: "General Question",
           },
-        },
-      ]);
+        ])
+        .select();
+
+      if (leadError) {
+        console.error("❌ Error creating lead:", leadError);
+        return;
+      }
 
       console.log("✅ Created lead:", lead[0].id);
     }
   } catch (err) {
-    console.error("❌ Error saving to Airtable:", err);
+    console.error("❌ Error saving to Supabase:", err);
   }
 }
 
@@ -509,7 +530,7 @@ app.post("/process-speech", async (req, res) => {
 
       case CONVERSATION_STATES.CONFIRM:
         // Save to Airtable and complete
-        await saveToAirtable(collectedData, req.body.From);
+        await saveToSupabase(collectedData, req.body.From);
         nextState = CONVERSATION_STATES.COMPLETE;
         break;
 
