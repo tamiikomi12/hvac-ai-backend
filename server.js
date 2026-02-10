@@ -262,6 +262,13 @@ async function saveToSupabase(collectedData, callerPhoneNumber) {
         console.log("✅ Found existing customer:", customerId);
       } else {
         // Create new customer
+        console.log("About to insert customer with data:", {
+          customer_name: collectedData.name,
+          phone_number: collectedData.phone,
+          primary_address: collectedData.address,
+          customer_type: "Residential",
+          source: "Direct Work Order",
+        });
         const { data: newCustomer, error: customerError } = await supabase
           .from("customers")
           .insert([
