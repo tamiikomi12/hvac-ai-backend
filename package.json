@@ -16,7 +16,6 @@
   "type": "commonjs",
   "dependencies": {
     "@supabase/supabase-js": "^2.93.2",
-    "axios": "^1.13.2",
     "express": "^5.2.1",
     "openai": "^4.20.0",
     "ws": "^8.18.3"

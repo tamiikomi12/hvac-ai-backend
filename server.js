@@ -1,6 +1,5 @@
 const express = require("express");
 const OpenAI = require("openai");
-const axios = require("axios");
 const { createClient } = require("@supabase/supabase-js");
 
 // Conversation states
@@ -51,7 +50,6 @@ try {
 }
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 const SUPABASE_URL =
   process.env.SUPABASE_URL ||
   "https://okgbvaeaqrcuxlzgwgjc.supabase.co";
@@ -622,25 +620,6 @@ app.post("/process-speech", async (req, res) => {
     }
 
     const escapedReply = escapeXml(assistantReply);
-
-    // Log to n8n (non-blocking)
-    if (N8N_WEBHOOK_URL) {
-      try {
-        const logData = {
-          callSid: callSid,
-          from: req.body.From,
-          transcript: speech,
-          ai_reply: assistantReply,
-          timestamp: new Date().toISOString(),
-        };
-
-        const resp = await axios.post(N8N_WEBHOOK_URL, logData);
-        console.log("✅ Logged to n8n:", resp.status);
-      } catch (err) {
-        console.error("❌ n8n logging failed:", err.response?.status, err.response?.data || err.message);
-        // Don't break the call if n8n fails
-      }
-    }
 
     // Return TwiML
     const twiml = `
