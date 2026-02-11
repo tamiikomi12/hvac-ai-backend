@@ -543,9 +543,9 @@ CRITICAL RULES:
           output_audio_format: "g711_ulaw",
           turn_detection: {
             type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 500,
+            threshold: 0.6, // Increase from 0.5 (less sensitive to noise)
+            prefix_padding_ms: 500, // Increase from 300 (capture more of start of speech)
+            silence_duration_ms: 1200, // Increase from 500 (wait longer before assuming done)
           },
           input_audio_transcription: {
             model: "whisper-1",
@@ -557,24 +557,16 @@ CRITICAL RULES:
 
       openaiWs.send(JSON.stringify(sessionUpdate));
 
-      // Send initial greeting
-      const greeting = {
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: "Greet the caller and ask if they are calling to schedule HVAC service or have questions about services.",
-            },
-          ],
-        },
-      };
-      openaiWs.send(JSON.stringify(greeting));
-
-      // Trigger response
-      openaiWs.send(JSON.stringify({ type: "response.create" }));
+      // Send initial greeting instruction
+      openaiWs.send(
+        JSON.stringify({
+          type: "response.create",
+          response: {
+            instructions:
+              'Greet the caller warmly by saying: "Hi, this is AVA with [company name]. Are you calling to schedule HVAC service, or do you have questions about our services?" Then wait for their response.',
+          },
+        })
+      );
 
       resolve(openaiWs);
     });
