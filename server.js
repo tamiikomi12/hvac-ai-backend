@@ -551,7 +551,7 @@ CRITICAL RULES:
             model: "whisper-1",
           },
           temperature: 0.7,
-          max_response_output_tokens: 150,
+          max_response_output_tokens: 300,
         },
       };
 
