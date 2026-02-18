@@ -366,6 +366,8 @@ CRITICAL BEHAVIOR RULES:
 8. When confirming details, summarize naturally — don't parrot back every word.
 9. Always end with a clear "what happens next" and a specific timeframe.
 10. If the caller wants a human, don't resist — capture their info and promise a callback.
+11. When collecting a name, if you're not confident you heard it correctly, confirm it naturally: "Just want to make sure I have that right — was that [name]?" If they spell it out, listen carefully to each letter and repeat the full name back.
+12. If a caller's name sounds unusual or unfamiliar, DO NOT guess or approximate. Ask them to repeat it: "Could you say that one more time for me?"
 
 PATIENCE RULES (CRITICAL):
 - After asking a question, WAIT. Do not speak until the caller has clearly finished their answer.
@@ -453,9 +455,9 @@ If they ask about pricing, availability, or warranty: "That's a great question. 
           output_audio_format: "g711_ulaw",
           turn_detection: {
             type: "server_vad",
-            threshold: 0.8, // High — needs clear speech to trigger, reduces false positives
-            prefix_padding_ms: 1000, // Full second before detected speech
-            silence_duration_ms: 3000, // 3 full seconds of silence before assuming done
+            threshold: 0.75,
+            prefix_padding_ms: 600,
+            silence_duration_ms: 2000,
           },
           input_audio_transcription: {
             model: "whisper-1",
