@@ -1,21 +1,7 @@
 const express = require("express");
-const OpenAI = require("openai");
 const { createClient } = require("@supabase/supabase-js");
 const WebSocket = require("ws");
 const { WebSocketServer } = require("ws");
-
-// Conversation states
-const CONVERSATION_STATES = {
-  GREETING: "GREETING",
-  DETERMINE_CALL_TYPE: "DETERMINE_CALL_TYPE",
-  GET_NAME: "GET_NAME",
-  GET_PHONE: "GET_PHONE",
-  GET_ADDRESS: "GET_ADDRESS",
-  GET_ISSUE: "GET_ISSUE",
-  CONFIRM: "CONFIRM",
-  COMPLETE: "COMPLETE",
-  LEAD_INQUIRY: "LEAD_INQUIRY",
-};
 
 console.log("📦 Starting server...");
 console.log(`Node version: ${process.version}`);
@@ -51,7 +37,6 @@ try {
   BASE_URL = BASE_URL.replace(/\/[^\/]*$/, "").replace(/\/+$/, "");
 }
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const SUPABASE_URL =
   process.env.SUPABASE_URL ||
   "https://okgbvaeaqrcuxlzgwgjc.supabase.co";
@@ -59,13 +44,12 @@ const SUPABASE_ANON_KEY =
   process.env.SUPABASE_ANON_KEY ||
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9rZ2J2YWVhcXJjdXhsemd3Z2pjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk1NjMwMTMsImV4cCI6MjA4NTEzOTAxM30.BPsHornv7HW_RX7Ys7FBaeCygnN9BV7FwLWmMjaUQLU";
 
-// Initialize OpenAI client
+// Check OpenAI API key
 if (!OPENAI_API_KEY) {
   console.warn("⚠️  OPENAI_API_KEY not set. OpenAI features will not work.");
+} else {
+  console.log("✅ OpenAI API key configured");
 }
-const openai = OPENAI_API_KEY
-  ? new OpenAI({ apiKey: OPENAI_API_KEY })
-  : null;
 
 // Initialize Supabase
 const supabase =
@@ -87,265 +71,23 @@ const wss = new WebSocketServer({ noServer: true });
 // Store active connections: Map<streamSid, { twilioWs, openaiWs, conversation }>
 const activeConnections = new Map();
 
-// ========================
-// Conversation Store
-// ========================
-// In-memory store: { CallSid: { history: [...], lastActive: timestamp, state: '...', collectedData: {...} } }
-const conversations = new Map();
-
-// Helper: Escape XML special characters for TwiML
-function escapeXml(text) {
-  if (!text) return "";
-  return String(text)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
-// Helper: Cleanup old conversations (inactive > 15 minutes)
-function cleanupOldConversations() {
+// Cleanup stale connections every 5 minutes
+setInterval(() => {
   const now = Date.now();
-  const fifteenMinutes = 15 * 60 * 1000;
   let cleaned = 0;
-
-  for (const [callSid, conv] of conversations.entries()) {
-    if (now - conv.lastActive > fifteenMinutes) {
-      conversations.delete(callSid);
+  for (const [streamSid, conn] of activeConnections.entries()) {
+    if (conn.connectedAt && now - conn.connectedAt > 15 * 60 * 1000) {
+      console.log(`🧹 Cleaning up stale connection: ${streamSid}`);
+      if (conn.openaiWs) conn.openaiWs.close();
+      if (conn.twilioWs) conn.twilioWs.close();
+      activeConnections.delete(streamSid);
       cleaned++;
     }
   }
-
   if (cleaned > 0) {
-    console.log(`🧹 Cleaned up ${cleaned} old conversation(s)`);
+    console.log(`🧹 Cleaned up ${cleaned} stale connection(s)`);
   }
-}
-
-// Run cleanup every 5 minutes
-setInterval(cleanupOldConversations, 5 * 60 * 1000);
-
-// Helper: Determine priority from issue description
-function determinePriority(issueDescription) {
-  const issue = issueDescription.toLowerCase();
-
-  // Emergency keywords
-  if (
-    issue.includes("not working") ||
-    issue.includes("no heat") ||
-    issue.includes("no ac") ||
-    issue.includes("no air") ||
-    issue.includes("freezing") ||
-    issue.includes("too hot") ||
-    issue.includes("emergency")
-  ) {
-    return "Emergency";
-  }
-
-  // Urgent keywords
-  if (
-    issue.includes("strange noise") ||
-    issue.includes("smell") ||
-    issue.includes("leaking") ||
-    issue.includes("leak") ||
-    issue.includes("loud")
-  ) {
-    return "Urgent";
-  }
-
-  // Default to standard
-  return "Standard";
-}
-
-// Helper: Determine system type from issue description
-function determineSystemType(issueDescription) {
-  const issue = issueDescription.toLowerCase();
-
-  if (
-    issue.includes("heat") ||
-    issue.includes("furnace") ||
-    issue.includes("warm")
-  ) {
-    return "Heating";
-  }
-
-  if (
-    issue.includes("ac") ||
-    issue.includes("air conditioning") ||
-    issue.includes("cooling") ||
-    issue.includes("cold")
-  ) {
-    return "Cooling";
-  }
-
-  return "Unknown";
-}
-
-// Helper: Extract data from user responses using OpenAI
-async function extractDataFromResponse(userMessage, fieldToExtract) {
-  if (!openai) return null;
-
-  const prompts = {
-    name: "Extract just the person's name from this message. Return only the name, nothing else: ",
-    phone: "Extract the phone number from this message. Return only the phone number in format XXX-XXX-XXXX if possible, otherwise as given: ",
-    address:
-      "Extract the full service address from this message. Return only the address: ",
-    callType:
-      'Is this person calling to schedule HVAC service (return "work_order") or just asking for information/pricing (return "lead")? Return only work_order or lead: ',
-  };
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages: [
-        {
-          role: "user",
-          content: prompts[fieldToExtract] + userMessage,
-        },
-      ],
-      temperature: 0.3,
-      max_tokens: 50,
-    });
-
-    const extracted = completion.choices[0]?.message?.content?.trim();
-    return extracted || null;
-  } catch (err) {
-    console.error("Error extracting data:", err);
-    return null;
-  }
-}
-
-// Helper: Get prompt for current state
-function getPromptForState(state, collectedData) {
-  switch (state) {
-    case CONVERSATION_STATES.GREETING:
-      return 'You are AVA, a receptionist for an HVAC company. Say: "Hi, this is AVA. Are you calling to schedule HVAC service, or do you have questions about our services?" Say ONLY this. Do not add anything else.';
-
-    case CONVERSATION_STATES.GET_NAME:
-      return 'You are AVA, a receptionist. Say: "Great! Can I get your name please?" Say ONLY this. Do not add anything else.';
-
-    case CONVERSATION_STATES.GET_ADDRESS:
-      return `You are AVA, a receptionist. Say: "Thanks ${collectedData.name}. What's the address where you need service?" Say ONLY this. Do not add anything else.`;
-
-    case CONVERSATION_STATES.GET_ISSUE:
-      return `You are AVA, a receptionist. Say: "Got it. Can you briefly describe what's happening with your HVAC system?" Say ONLY this. Do not provide ANY troubleshooting advice. Do not list steps. Just ask the question.`;
-
-    case CONVERSATION_STATES.CONFIRM:
-      return `You are AVA, a receptionist. Say EXACTLY: "I've created a service request for ${collectedData.issue} at ${collectedData.address}. A technician will call you back within 2 hours. Is there anything else I should note?" Do NOT provide troubleshooting steps. Do NOT give advice. ONLY say this confirmation.`;
-
-    case CONVERSATION_STATES.LEAD_INQUIRY:
-      return 'You are AVA, a receptionist. Answer their question briefly in 1-2 sentences, then ask: "Can I get your name and number for follow-up?" Keep it very brief.';
-
-    default:
-      return "You are AVA, a receptionist for HVAC services. Be brief and professional. Do not provide troubleshooting advice.";
-  }
-}
-
-// Helper: Save collected data to Supabase
-async function saveToSupabase(collectedData, callerPhoneNumber) {
-  if (!supabase) {
-    console.error("❌ Supabase not configured");
-    return;
-  }
-
-  try {
-    console.log("💾 Saving to Supabase:", collectedData);
-
-    if (collectedData.callType === "work_order") {
-      // Check if customer exists by phone number
-      const { data: existingCustomers, error: searchError } = await supabase
-        .from("customers")
-        .select("id")
-        .eq("phone_number", collectedData.phone)
-        .limit(1);
-
-      if (searchError) {
-        console.error("Error searching for customer:", searchError);
-      }
-
-      let customerId = null;
-
-      if (existingCustomers && existingCustomers.length > 0) {
-        customerId = existingCustomers[0].id;
-        console.log("✅ Found existing customer:", customerId);
-      } else {
-        // Create new customer
-        console.log("About to insert customer with data:", {
-          customer_name: collectedData.name,
-          phone_number: collectedData.phone,
-          primary_address: collectedData.address,
-          customer_type: "Residential",
-          source: "Direct Work Order",
-        });
-        const { data: newCustomer, error: customerError } = await supabase
-          .from("customers")
-          .insert([
-            {
-              customer_name: collectedData.name,
-              phone_number: collectedData.phone,
-              primary_address: collectedData.address,
-              customer_type: "Residential",
-              source: "Direct Work Order",
-            },
-          ])
-          .select();
-
-        if (customerError) {
-          console.error("❌ Error creating customer:", customerError);
-          return;
-        }
-
-        customerId = newCustomer[0].id;
-        console.log("✅ Created new customer:", customerId);
-      }
-
-      // Create work order
-      const { data: workOrder, error: workOrderError } = await supabase
-        .from("work_orders")
-        .insert([
-          {
-            customer_id: customerId,
-            service_address: collectedData.address,
-            issue_description: collectedData.issue,
-            system_type: collectedData.systemType,
-            priority: collectedData.priority,
-            status: "New",
-          },
-        ])
-        .select();
-
-      if (workOrderError) {
-        console.error("❌ Error creating work order:", workOrderError);
-        return;
-      }
-
-      console.log("✅ Created work order:", workOrder[0].id);
-    } else if (collectedData.callType === "lead") {
-      // Save as lead
-      const { data: lead, error: leadError } = await supabase
-        .from("leads")
-        .insert([
-          {
-            lead_name: collectedData.name || "Unknown",
-            phone_number: collectedData.phone || callerPhoneNumber,
-            notes: collectedData.issue || "General inquiry",
-            status: "New",
-            inquiry_type: "General Question",
-          },
-        ])
-        .select();
-
-      if (leadError) {
-        console.error("❌ Error creating lead:", leadError);
-        return;
-      }
-
-      console.log("✅ Created lead:", lead[0].id);
-    }
-  } catch (err) {
-    console.error("❌ Error saving to Supabase:", err);
-  }
-}
+}, 5 * 60 * 1000);
 
 // ========================
 // Health & Root
@@ -389,110 +131,133 @@ app.use((req, res) => {
 });
 
 // ========================
-// Helper: Extract data from conversation
+// Handle save_service_call function call from OpenAI
 // ========================
-function extractDataFromTranscript(transcript, conversationData) {
-  const lower = transcript.toLowerCase();
-
-  // Detect call type
-  if (!conversationData.callType) {
-    if (
-      lower.includes("schedule") ||
-      lower.includes("service") ||
-      lower.includes("repair") ||
-      lower.includes("fix") ||
-      lower.includes("broken") ||
-      lower.includes("not working")
-    ) {
-      conversationData.callType = "work_order";
-      console.log("🎯 Detected: work_order");
-    } else if (
-      lower.includes("question") ||
-      lower.includes("price") ||
-      lower.includes("cost") ||
-      lower.includes("info")
-    ) {
-      conversationData.callType = "lead";
-      console.log("🎯 Detected: lead");
-    }
-  }
-
-  // Simple name extraction (anything that sounds like a name after "my name is" or similar)
-  if (!conversationData.name && conversationData.callType === "work_order") {
-    const namePatterns = [
-      /(?:my name is|i'm|this is|name's)\s+([a-z]+(?:\s+[a-z]+)?)/i,
-      /^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)$/,
-    ];
-
-    for (const pattern of namePatterns) {
-      const match = transcript.match(pattern);
-      if (match && match[1] && match[1].length > 2) {
-        conversationData.name = match[1].trim();
-        console.log(`🎯 Extracted name: ${conversationData.name}`);
-        break;
-      }
-    }
-  }
-
-  // Address extraction (look for street numbers and common address words)
-  if (
-    !conversationData.address &&
-    conversationData.callType === "work_order"
-  ) {
-    if (
-      /\d+.*(?:street|st|avenue|ave|road|rd|drive|dr|boulevard|blvd|lane|ln|way|court|ct)/i.test(
-        lower
-      )
-    ) {
-      conversationData.address = transcript.trim();
-      console.log(`🎯 Extracted address: ${conversationData.address}`);
-    }
-  }
-
-  // Issue extraction (if they mention HVAC problems)
-  if (!conversationData.issue && conversationData.callType === "work_order") {
-    if (
-      lower.includes("ac") ||
-      lower.includes("air") ||
-      lower.includes("heat") ||
-      lower.includes("furnace") ||
-      lower.includes("cool") ||
-      lower.includes("warm") ||
-      lower.includes("not working") ||
-      lower.includes("broken")
-    ) {
-      conversationData.issue = transcript.trim();
-      conversationData.systemType = determineSystemType(transcript);
-      conversationData.priority = determinePriority(transcript);
-      console.log(`🎯 Extracted issue: ${conversationData.issue}`);
-      console.log(
-        `🎯 System: ${conversationData.systemType}, Priority: ${conversationData.priority}`
-      );
-    }
-  }
-}
-
-// ========================
-// Save complete conversation to Supabase
-// ========================
-async function saveConversationToSupabase(conversationData) {
-  // Check if we have minimum required data
-  if (conversationData.callType === "work_order") {
-    if (
-      !conversationData.name ||
-      !conversationData.address ||
-      !conversationData.issue
-    ) {
-      console.log("⚠️ Incomplete work order data, not saving yet");
-      return;
-    }
+async function handleSaveServiceCall(args, callerPhone) {
+  if (!supabase) {
+    console.error("❌ Supabase not configured");
+    return;
   }
 
   try {
-    await saveToSupabase(conversationData, conversationData.phone);
+    console.log("💾 Processing service call save:", args);
+
+    const isLead =
+      args.call_type === "quote" || args.call_type === "general_inquiry";
+
+    if (!isLead) {
+      // SERVICE CALL / EMERGENCY / MAINTENANCE / CALLBACK → save customer + work order
+
+      // Check if customer exists by phone number
+      let customerId = null;
+      if (callerPhone) {
+        const { data: existingCustomers, error: searchError } =
+          await supabase
+            .from("customers")
+            .select("id")
+            .eq("phone_number", callerPhone)
+            .limit(1);
+
+        if (searchError) {
+          console.error("Error searching for customer:", searchError);
+        }
+
+        if (existingCustomers && existingCustomers.length > 0) {
+          customerId = existingCustomers[0].id;
+          console.log("✅ Found existing customer:", customerId);
+        }
+      }
+
+      // Create or update customer
+      if (!customerId) {
+        const customerData = {
+          customer_name: args.customer_name,
+          phone_number: callerPhone,
+          primary_address: args.service_address,
+          customer_type: args.property_type === "commercial" ? "Commercial" : "Residential",
+          source: args.referral_source || "Phone Call",
+        };
+        if (args.email) customerData.email = args.email;
+
+        console.log("About to insert customer with data:", customerData);
+        const { data: newCustomer, error: customerError } = await supabase
+          .from("customers")
+          .insert([customerData])
+          .select();
+
+        if (customerError) {
+          console.error("❌ Error creating customer:", customerError);
+          return;
+        }
+
+        customerId = newCustomer[0].id;
+        console.log("✅ Created new customer:", customerId);
+      }
+
+      // Create work order with rich data
+      const workOrderData = {
+        customer_id: customerId,
+        service_address: args.service_address,
+        issue_description: args.issue_description,
+        system_type: args.system_type || "unknown",
+        priority: args.priority
+          ? args.priority.charAt(0).toUpperCase() + args.priority.slice(1)
+          : "Standard",
+        status: "New",
+        call_type: args.call_type,
+      };
+      if (args.system_brand) workOrderData.system_brand = args.system_brand;
+      if (args.system_age_years) workOrderData.system_age_years = args.system_age_years;
+      if (args.access_instructions) workOrderData.access_instructions = args.access_instructions;
+      if (args.scheduling_preference) workOrderData.scheduling_preference = args.scheduling_preference;
+      if (args.onsite_contact) workOrderData.onsite_contact = args.onsite_contact;
+      if (args.additional_notes) workOrderData.additional_notes = args.additional_notes;
+
+      const { data: workOrder, error: workOrderError } = await supabase
+        .from("work_orders")
+        .insert([workOrderData])
+        .select();
+
+      if (workOrderError) {
+        console.error("❌ Error creating work order:", workOrderError);
+        return;
+      }
+
+      console.log("✅ Created work order:", workOrder[0].id);
+    } else {
+      // QUOTE / GENERAL INQUIRY → save as lead
+      const leadData = {
+        lead_name: args.customer_name || "Unknown",
+        phone_number: callerPhone,
+        notes: args.issue_description || "General inquiry",
+        status: "New",
+        inquiry_type: args.call_type === "quote" ? "Quote Request" : "General Question",
+      };
+      if (args.email) leadData.email = args.email;
+      if (args.property_type) leadData.property_type = args.property_type;
+      if (args.service_address) leadData.service_address = args.service_address;
+      if (args.referral_source) leadData.referral_source = args.referral_source;
+      if (args.system_brand) leadData.current_system_brand = args.system_brand;
+      if (args.system_age_years) leadData.current_system_age = args.system_age_years;
+      if (args.scheduling_preference) leadData.consultation_preferred_time = args.scheduling_preference;
+
+      const { data: lead, error: leadError } = await supabase
+        .from("leads")
+        .insert([leadData])
+        .select();
+
+      if (leadError) {
+        console.error("❌ Error creating lead:", leadError);
+        return;
+      }
+
+      console.log("✅ Created lead:", lead[0].id);
+    }
+
     console.log("💾 Successfully saved to Supabase");
   } catch (err) {
-    console.error("❌ Failed to save to Supabase:", err);
+    console.error("❌ Error saving to Supabase:", err);
+    throw err;
   }
 }
 
@@ -519,35 +284,101 @@ async function connectToOpenAI(streamSid, conversationData) {
         type: "session.update",
         session: {
           modalities: ["text", "audio"],
-          instructions: `You are AVA, a professional receptionist for an HVAC company.
+          instructions: `You are AVA, the virtual assistant for an HVAC service company.
 
-CRITICAL CONVERSATION RULES:
-1. Ask ONE question at a time
-2. WAIT for the complete answer - do NOT interrupt or assume
-3. After they answer, ACKNOWLEDGE what they said before asking next question
-4. NEVER rush through - this is a phone call, not a race
+PERSONALITY:
+- Warm, confident, and efficient — like the best office manager you've ever met
+- You're genuinely helpful, not performatively helpful
+- You use casual-professional language — friendly but competent
+- You speak in short, clear sentences — never long-winded
+- You adapt your energy to the caller — calm for emergencies, upbeat for tune-ups
+- You NEVER sound like a robot reading a script
 
-CONVERSATION FLOW:
-Step 1: Ask "Hi, this is AVA. Are you calling to schedule HVAC service, or do you have questions?"
-- WAIT for their full response
-- If scheduling, say "Great, I can help with that"
+CRITICAL BEHAVIOR RULES:
+1. ALWAYS let the caller finish speaking before responding. Wait for a full pause.
+2. NEVER ask for their phone number — you already have it from caller ID.
+3. If they give you information you didn't ask for yet, acknowledge it and skip that question.
+4. If they seem confused or unsure, offer options rather than open-ended questions.
+5. NEVER quote specific pricing unless explicitly authorized.
+6. For gas leaks, carbon monoxide, electrical sparking, or flooding: immediately advise calling 911 if dangerous, then proceed with emergency dispatch.
+7. Keep the total call under 3-4 minutes for standard service, under 2 minutes for emergencies.
+8. When confirming details, summarize naturally — don't parrot back every word.
+9. Always end with a clear "what happens next" and a specific timeframe.
+10. If the caller wants a human, don't resist — capture their info and promise a callback.
 
-Step 2: Ask "Can I get your full name please?"
-- WAIT for their complete name
-- Repeat it back: "Thank you, [NAME]"
+CONVERSATION STRUCTURE:
+Phase 1 — Greeting + Classification (0-15 seconds)
+  Greet warmly, ask how you can help, listen to classify the call type.
 
-Step 3: Ask "What's the address where you need service?"
-- WAIT for their complete address (street, city, everything)
-- Repeat it back: "Got it, [ADDRESS]"
+Phase 2 — Empathy + Engagement (15-30 seconds)
+  Acknowledge their situation before asking for data. Match their energy.
+  - Emergency: "Let's get someone to you right away"
+  - Service: "That's no fun, let's get that taken care of"
+  - Maintenance: "Smart move getting ahead of it"
+  - Quote: "Absolutely, we can help with that"
 
-Step 4: Ask "Can you describe what's happening with your heating or cooling system?"
-- WAIT for their full description
-- Acknowledge: "I understand, [summarize issue]"
+Phase 3 — Data Collection (30 seconds - 2.5 minutes)
+  Collect required fields for this call type. Ask one question at a time.
+  Use natural transitions between questions. Accept partial info gracefully.
 
-Step 5: ONLY after you have NAME, ADDRESS, and ISSUE, say:
-"Perfect. I've created a service request for [ISSUE] at [ADDRESS]. A technician will call you back within 2 hours at [PHONE]. Is there anything else I should note for them?"
+Phase 4 — Confirmation + Next Steps (15-30 seconds)
+  Brief natural summary of what you captured. Clear next step with timeframe.
+  Reassurance. Friendly close.
 
-NEVER skip ahead. NEVER assume you have information you haven't heard yet. ALWAYS wait for complete answers before moving to the next question.`,
+CALL TYPES AND WHAT TO COLLECT:
+1. EMERGENCY (gas smell, no heat in winter, CO alarm, flooding, sparking):
+   - Issue safety warning if needed ("If you smell gas strongly, step outside and call 911")
+   - Name, address, brief description, access instructions — that's it, move fast
+   - "A technician will call you back within 30 minutes"
+
+2. SERVICE REQUEST (AC not cooling, heater won't turn on, making noises):
+   - Name, address, home or business?, issue description, when it started, what they've tried
+   - System details if offered (brand, age — "totally fine if you don't know")
+   - Access instructions, scheduling preference, who will be on-site, referral source
+   - "A technician will reach out within 2 hours"
+
+3. MAINTENANCE/TUNE-UP (annual service, tune-up, inspection):
+   - Name, address, home or business?, which system (heating/cooling/both)
+   - System details, scheduling preference, access, referral source
+   - Upsell naturally: "just the furnace, or want us to look at the AC too?"
+
+4. QUOTE/ESTIMATE (pricing, replacement, thinking about new system):
+   - Name, address, home or business?, what they're looking for
+   - Current system details, interest areas (efficiency, heat pump, etc.)
+   - Push toward in-home consultation — never quote pricing on phone
+   - Scheduling preference, email for confirmation, referral source
+
+5. EXISTING CUSTOMER/CALLBACK (someone was just here, calling back about):
+   - Verify name, confirm address on file, capture new/recurring issue
+   - Flag as callback/return visit for priority
+
+DATA TO COLLECT (in priority order):
+1. Full name
+2. Service address (confirm: "Is that a house or a business?")
+3. Issue description (let them explain, then ask clarifying questions)
+4. System details if relevant (type, brand, age — make these optional/low-pressure)
+5. Access instructions (gate codes, locked areas, pets)
+6. Scheduling preference
+7. Who will be on-site
+8. Referral source ("How'd you hear about us?")
+9. Email (optional — only for quotes/estimates)
+
+URGENCY DETECTION:
+- EMERGENCY: gas smell, no heat (winter), CO alarm, flooding, electrical issues, sparking
+- URGENT: system not working at all, home is very hot/cold, elderly or infant in home
+- STANDARD: system working but poorly, intermittent issues, noises
+- LOW: maintenance, tune-ups, inspections, general questions
+
+NATURAL LANGUAGE:
+Use: "Let's get that taken care of", "I hear you", "Here's what's going to happen", "You're in good hands", "Smart move", "That's helpful, thank you", "Totally fine if you don't know", "You won't need to repeat yourself"
+Never use: "I understand your frustration", "For quality assurance purposes", "Your call is important to us", "Let me repeat that back to you", "Per our records"
+Transitions: "And—", "Now—", "One more thing—", "Last thing—", "Great. So—", "That helps. Now—"
+
+WHEN YOU HAVE ALL REQUIRED INFO:
+Call the save_service_call function with all collected data. Then confirm to the caller what happens next.
+
+WHEN YOU DON'T KNOW SOMETHING:
+If they ask about pricing, availability, or warranty: "That's a great question. I want to make sure you get an accurate answer, so I'll have the team include that when they reach out to you."`,
           voice: "alloy",
           input_audio_format: "g711_ulaw",
           output_audio_format: "g711_ulaw",
@@ -560,6 +391,109 @@ NEVER skip ahead. NEVER assume you have information you haven't heard yet. ALWAY
           input_audio_transcription: {
             model: "whisper-1",
           },
+          tools: [
+            {
+              type: "function",
+              name: "save_service_call",
+              description:
+                "Save a completed service call to the database. Call this when you have collected all necessary information from the caller.",
+              parameters: {
+                type: "object",
+                properties: {
+                  call_type: {
+                    type: "string",
+                    enum: [
+                      "emergency",
+                      "service_request",
+                      "maintenance",
+                      "quote",
+                      "callback",
+                      "general_inquiry",
+                    ],
+                    description:
+                      "The type of call based on what the customer needs",
+                  },
+                  customer_name: {
+                    type: "string",
+                    description: "Full name of the caller",
+                  },
+                  service_address: {
+                    type: "string",
+                    description:
+                      "Full street address where service is needed",
+                  },
+                  property_type: {
+                    type: "string",
+                    enum: ["residential", "commercial"],
+                    description:
+                      "Whether the property is a home or business",
+                  },
+                  issue_description: {
+                    type: "string",
+                    description:
+                      "Natural language summary of what the customer described as the problem, including symptoms, duration, and any diagnostic details",
+                  },
+                  system_type: {
+                    type: "string",
+                    enum: ["heating", "cooling", "both", "unknown"],
+                    description: "Which HVAC system is affected",
+                  },
+                  system_brand: {
+                    type: "string",
+                    description:
+                      "Brand of the HVAC system if mentioned",
+                  },
+                  system_age_years: {
+                    type: "number",
+                    description:
+                      "Approximate age of the system in years if mentioned",
+                  },
+                  priority: {
+                    type: "string",
+                    enum: ["emergency", "urgent", "standard", "low"],
+                    description: "Urgency level based on the issue",
+                  },
+                  access_instructions: {
+                    type: "string",
+                    description:
+                      "Gate codes, locked areas, pet warnings, or other access notes",
+                  },
+                  scheduling_preference: {
+                    type: "string",
+                    description:
+                      "When the customer prefers service (e.g., 'ASAP', 'Tuesday morning', 'Saturday afternoon')",
+                  },
+                  onsite_contact: {
+                    type: "string",
+                    description:
+                      "Who will be present for the service visit",
+                  },
+                  referral_source: {
+                    type: "string",
+                    description:
+                      "How the customer heard about the company",
+                  },
+                  email: {
+                    type: "string",
+                    description: "Customer email if provided",
+                  },
+                  additional_notes: {
+                    type: "string",
+                    description:
+                      "Any other relevant details — what they've already tried, previous tech visits, special requests",
+                  },
+                },
+                required: [
+                  "call_type",
+                  "customer_name",
+                  "service_address",
+                  "issue_description",
+                  "priority",
+                ],
+              },
+            },
+          ],
+          tool_choice: "auto",
           temperature: 0.7,
           max_response_output_tokens: 300,
         },
@@ -567,13 +501,13 @@ NEVER skip ahead. NEVER assume you have information you haven't heard yet. ALWAY
 
       openaiWs.send(JSON.stringify(sessionUpdate));
 
-      // Send initial greeting instruction
+      // Send initial greeting — AVA introduces herself naturally
       openaiWs.send(
         JSON.stringify({
           type: "response.create",
           response: {
             instructions:
-              'Greet the caller warmly by saying: "Hi, this is AVA with [company name]. Are you calling to schedule HVAC service, or do you have questions about our services?" Then wait for their response.',
+              "Greet the caller warmly and naturally. Say something like: \"Hi, this is AVA — how can I help you today?\" Keep it short and warm. Then listen to classify their call type.",
           },
         })
       );
@@ -633,23 +567,71 @@ NEVER skip ahead. NEVER assume you have information you haven't heard yet. ALWAY
 
           case "conversation.item.input_audio_transcription.completed":
             console.log(`🗣️ Caller said: ${event.transcript}`);
+            break;
 
-            // Extract data from what caller said
-            if (connection) {
-              extractDataFromTranscript(
-                event.transcript,
-                connection.conversationData
-              );
+          case "response.function_call_arguments.done":
+            // OpenAI is calling our save_service_call function
+            console.log(
+              `🔧 Function call: ${event.name}`,
+              event.arguments
+            );
 
-              // Check if we have all data and should save
-              const data = connection.conversationData;
-              if (
-                data.callType === "work_order" &&
-                data.name &&
-                data.address &&
-                data.issue
-              ) {
-                await saveConversationToSupabase(data);
+            if (event.name === "save_service_call") {
+              try {
+                const args = JSON.parse(event.arguments);
+                console.log("💾 Saving service call data:", args);
+
+                // Save to Supabase using the structured data from AI
+                await handleSaveServiceCall(
+                  args,
+                  connection?.conversationData?.phone
+                );
+
+                // Send function result back to OpenAI so it can confirm to caller
+                openaiWs.send(
+                  JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "function_call_output",
+                      call_id: event.call_id,
+                      output: JSON.stringify({
+                        success: true,
+                        message:
+                          "Service call saved successfully. Confirm the details to the caller and let them know what happens next.",
+                      }),
+                    },
+                  })
+                );
+
+                // Trigger OpenAI to respond with confirmation
+                openaiWs.send(
+                  JSON.stringify({ type: "response.create" })
+                );
+              } catch (err) {
+                console.error(
+                  "❌ Error handling function call:",
+                  err
+                );
+
+                // Send error result back to OpenAI
+                openaiWs.send(
+                  JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "function_call_output",
+                      call_id: event.call_id,
+                      output: JSON.stringify({
+                        success: false,
+                        message:
+                          "There was an issue saving, but reassure the caller their information has been noted and a technician will follow up.",
+                      }),
+                    },
+                  })
+                );
+
+                openaiWs.send(
+                  JSON.stringify({ type: "response.create" })
+                );
               }
             }
             break;
@@ -682,13 +664,7 @@ wss.on("connection", async (twilioWs) => {
   let streamSid = null;
   let openaiWs = null;
   let conversationData = {
-    callType: null,
-    name: null,
     phone: null,
-    address: null,
-    issue: null,
-    systemType: null,
-    priority: null,
   };
 
   // Handle messages from Twilio
@@ -713,6 +689,7 @@ wss.on("connection", async (twilioWs) => {
             twilioWs,
             openaiWs,
             conversationData,
+            connectedAt: Date.now(),
           });
           break;
 
