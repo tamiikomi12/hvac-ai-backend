@@ -106,10 +106,16 @@ app.get("/health", (req, res) => {
 app.post("/voice", async (req, res) => {
   console.log("📞 Incoming call");
 
+  // Capture caller's phone number from Twilio webhook payload
+  const callerPhone = req.body.From || req.body.Caller || "unknown";
+  console.log(`📱 Caller phone: ${callerPhone}`);
+
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="wss://${req.get("host")}/media-stream" />
+    <Stream url="wss://${req.get("host")}/media-stream">
+      <Parameter name="callerPhone" value="${callerPhone}" />
+    </Stream>
   </Connect>
 </Response>`;
 
@@ -199,19 +205,36 @@ async function handleSaveServiceCall(args, callerPhone) {
         customer_id: customerId,
         service_address: args.service_address,
         issue_description: args.issue_description,
-        system_type: args.system_type || "unknown",
+        system_type: args.system_type || "Unknown",
         priority: args.priority
           ? args.priority.charAt(0).toUpperCase() + args.priority.slice(1)
           : "Standard",
         status: "New",
-        call_type: args.call_type,
       };
-      if (args.system_brand) workOrderData.system_brand = args.system_brand;
-      if (args.system_age_years) workOrderData.system_age_years = args.system_age_years;
-      if (args.access_instructions) workOrderData.access_instructions = args.access_instructions;
-      if (args.scheduling_preference) workOrderData.scheduling_preference = args.scheduling_preference;
-      if (args.onsite_contact) workOrderData.onsite_contact = args.onsite_contact;
-      if (args.additional_notes) workOrderData.additional_notes = args.additional_notes;
+
+      // Only add optional fields if they have values
+      // These depend on the new columns existing in Supabase
+      const optionalFields = {
+        call_type: args.call_type,
+        system_brand: args.system_brand,
+        system_age_years: args.system_age_years,
+        access_instructions: args.access_instructions,
+        scheduling_preference: args.scheduling_preference,
+        onsite_contact: args.onsite_contact,
+        additional_notes: args.additional_notes,
+        property_type: args.property_type || "residential",
+      };
+
+      for (const [key, value] of Object.entries(optionalFields)) {
+        if (value !== undefined && value !== null) {
+          workOrderData[key] = value;
+        }
+      }
+
+      console.log(
+        "📋 Work order data to insert:",
+        JSON.stringify(workOrderData, null, 2)
+      );
 
       const { data: workOrder, error: workOrderError } = await supabase
         .from("work_orders")
@@ -219,7 +242,45 @@ async function handleSaveServiceCall(args, callerPhone) {
         .select();
 
       if (workOrderError) {
-        console.error("❌ Error creating work order:", workOrderError);
+        console.error(
+          "❌ Error creating work order:",
+          JSON.stringify(workOrderError, null, 2)
+        );
+        console.error(
+          "❌ Work order data that failed:",
+          JSON.stringify(workOrderData, null, 2)
+        );
+
+        // FALLBACK: Try with only the core fields that definitely exist
+        console.log("🔄 Retrying with core fields only...");
+        const coreWorkOrder = {
+          customer_id: customerId,
+          service_address: args.service_address,
+          issue_description: args.issue_description,
+          system_type: args.system_type || "Unknown",
+          priority: args.priority
+            ? args.priority.charAt(0).toUpperCase() + args.priority.slice(1)
+            : "Standard",
+          status: "New",
+        };
+
+        const { data: fallbackOrder, error: fallbackError } = await supabase
+          .from("work_orders")
+          .insert([coreWorkOrder])
+          .select();
+
+        if (fallbackError) {
+          console.error(
+            "❌ Fallback also failed:",
+            JSON.stringify(fallbackError, null, 2)
+          );
+          return;
+        }
+
+        console.log(
+          "✅ Created work order (core fields only):",
+          fallbackOrder[0].id
+        );
         return;
       }
 
@@ -306,6 +367,14 @@ CRITICAL BEHAVIOR RULES:
 9. Always end with a clear "what happens next" and a specific timeframe.
 10. If the caller wants a human, don't resist — capture their info and promise a callback.
 
+PATIENCE RULES (CRITICAL):
+- After asking a question, WAIT. Do not speak until the caller has clearly finished their answer.
+- People pause mid-sentence when giving addresses, phone numbers, and descriptions. This is normal. WAIT for them.
+- If you hear the beginning of an answer, do NOT jump in with "got it" or "thanks" until they've fully finished.
+- A 2-3 second pause is normal. Do not interpret it as them being done.
+- When collecting an address, wait extra long — people need time to recall house numbers and street names.
+- NEVER say "got it" or "thank you" and then immediately ask the next question. Always leave a brief beat between confirming and asking.
+
 CONVERSATION STRUCTURE:
 Phase 1 — Greeting + Classification (0-15 seconds)
   Greet warmly, ask how you can help, listen to classify the call type.
@@ -384,9 +453,9 @@ If they ask about pricing, availability, or warranty: "That's a great question. 
           output_audio_format: "g711_ulaw",
           turn_detection: {
             type: "server_vad",
-            threshold: 0.7, // Much higher - only trigger on clear speech
-            prefix_padding_ms: 800, // Capture more of beginning
-            silence_duration_ms: 2500, // Wait 2.5 FULL SECONDS before assuming done
+            threshold: 0.8, // High — needs clear speech to trigger, reduces false positives
+            prefix_padding_ms: 1000, // Full second before detected speech
+            silence_duration_ms: 3000, // 3 full seconds of silence before assuming done
           },
           input_audio_transcription: {
             model: "whisper-1",
@@ -677,9 +746,12 @@ wss.on("connection", async (twilioWs) => {
           streamSid = msg.start.streamSid;
           console.log(`📞 Stream started: ${streamSid}`);
 
-          // Store caller phone
+          // Store caller phone from custom parameter passed in TwiML
           conversationData.phone =
-            msg.start.customParameters?.From || msg.start.callSid;
+            msg.start.customParameters?.callerPhone || "unknown";
+          console.log(
+            `📱 Caller phone from stream: ${conversationData.phone}`
+          );
 
           // Connect to OpenAI Realtime API
           openaiWs = await connectToOpenAI(streamSid, conversationData);
